@@ -1,291 +1,279 @@
-# BigQuery ML Tutorial: Your First ML Model
-This tutorial walks you through creating your first machine learning model using BigQuery ML. You'll learn how to predict high-value customers using basic customer and transaction data.
+# Building a Customer Risk Analysis Pipeline
+Data Engineering Course - ZHAW School of Management and Law
+
+## Overview
+In this lesson, you'll build a data pipeline that analyzes customer churn risk using Cloud Composer (managed Apache Airflow). The pipeline processes clickstream data and support tickets to identify customers who might need attention.
 
 ## Prerequisites
-- Access to Google Cloud Platform
-- A project with BigQuery enabled
-- Basic SQL knowledge
-- The sample tables in your BigQuery dataset (created in previous video)
+- Access to Google Cloud Console
+- Project: cas-daeng-2024-pect
+- Storage bucket: retail-data-pect
+- Dataset: ecommerce
 
-> **Important**: Throughout this tutorial, you'll see example queries using the dataset `cas-daeng-2024-pect.ecommerce`. Replace this with your own dataset name following the pattern `cas-daeng-2024-[your-name].ecommerce`.
+## Step 1: Create Cloud Composer Environment
 
-## 1. Understanding the Data
+```bash
+# Set your project
+gcloud config set project cas-daeng-2024-pect
 
-First, let's look at our source tables:
-
-```sql
--- View customer data structure
-SELECT *
-FROM `cas-daeng-2024-pect.ecommerce.customers`
-LIMIT 5;
-
--- Replace with your dataset name like:
--- SELECT *
--- FROM `cas-daeng-2024-yourname.ecommerce.customers`
--- LIMIT 5;
-
--- View transaction data structure
-SELECT *
-FROM `cas-daeng-2024-pect.ecommerce.transactions`
-LIMIT 5;
+# Create Cloud Composer environment
+gcloud composer environments create customer-analysis \
+    --location europe-west6 \
+    --image-version composer-2.0.31 \
+    --environment-size small
 ```
 
-## 2. Data Preparation
+This will take approximately 20-25 minutes to complete.
 
-### 2.1 Create Customer Spending View
+## Step 2: Verify Data Files
 
-First, we'll aggregate customer spending patterns:
-
-```sql
--- Create a view with customer spending data
-CREATE OR REPLACE VIEW `cas-daeng-2024-pect.ecommerce.customer_spending` AS
-SELECT 
-  c.customer_id,
-  c.age,
-  SUM(t.total_amount) as total_spent,
-  COUNT(*) as purchase_count,
-  AVG(t.total_amount) as avg_purchase
-FROM `cas-daeng-2024-pect.ecommerce.customers` c
-JOIN `cas-daeng-2024-pect.ecommerce.transactions` t
-  ON c.customer_id = t.customer_id
-GROUP BY c.customer_id, c.age;
-
--- Don't forget to replace the dataset name with yours:
--- CREATE OR REPLACE VIEW `cas-daeng-2024-yourname.ecommerce.customer_spending`
+```bash
+# Check if your input files exist
+gsutil ls gs://retail-data-pect/
 ```
 
-### 2.2 Add Labels for High-Value Customers
+You should see:
+- clickstream.csv
+- support_tickets.csv
 
-Now we'll label customers as high-value based on above-average spending:
+Sample data format:
+```csv
+# clickstream.csv
+click_id,customer_id,product_id,timestamp,action
+1,2851,623,2024-01-26 16:54:34,view
+2,2185,697,2024-01-14 20:21:29,add_to_cart
 
-```sql
-CREATE OR REPLACE TABLE `cas-daeng-2024-pect.ecommerce.labeled_customers` AS
-WITH avg_spending AS (
-  SELECT AVG(total_spent) as avg_total_spent
-  FROM `cas-daeng-2024-pect.ecommerce.customer_spending`
+# support_tickets.csv
+ticket_id,customer_id,category,status,created_at,resolved_at,churn_risk
+1,7210,Shipping,Closed,2024-02-22 19:03:58,2024-04-26 05:51:04,0.5
+2,4960,Shipping,In Progress,2024-09-24 11:45:36,,0.25
+```
+
+## Step 3: Create and Upload DAG File
+
+1. Create a file named `customer_risk_analysis.py` with the following content:
+
+```python
+from airflow import DAG
+from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.utils.dates import days_ago
+from datetime import timedelta
+
+# Configuration
+PROJECT_ID = "cas-daeng-2024-pect"
+BUCKET = "retail-data-pect"
+DATASET = "ecommerce"
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': True,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+dag = DAG(
+    'customer_risk_analysis',
+    default_args=default_args,
+    description='Analyze customer churn risk using clickstream and support tickets',
+    schedule_interval='@daily',
+    start_date=days_ago(1),
+    catchup=False,
+    tags=['ecommerce', 'risk_analysis'],
 )
+
+# Task 1: Load clickstream data to BigQuery
+load_clickstream = GCSToBigQueryOperator(
+    task_id='load_clickstream',
+    bucket=BUCKET,
+    source_objects=['clickstream.csv'],
+    destination_project_dataset_table=f'{PROJECT_ID}.{DATASET}.clickstream',
+    schema_fields=[
+        {'name': 'click_id', 'type': 'INTEGER'},
+        {'name': 'customer_id', 'type': 'INTEGER'},
+        {'name': 'product_id', 'type': 'INTEGER'},
+        {'name': 'timestamp', 'type': 'TIMESTAMP'},
+        {'name': 'action', 'type': 'STRING'},
+    ],
+    write_disposition='WRITE_TRUNCATE',
+    dag=dag,
+)
+
+# Task 2: Load support tickets to BigQuery
+load_support_tickets = GCSToBigQueryOperator(
+    task_id='load_support_tickets',
+    bucket=BUCKET,
+    source_objects=['support_tickets.csv'],
+    destination_project_dataset_table=f'{PROJECT_ID}.{DATASET}.support_tickets',
+    schema_fields=[
+        {'name': 'ticket_id', 'type': 'INTEGER'},
+        {'name': 'customer_id', 'type': 'INTEGER'},
+        {'name': 'category', 'type': 'STRING'},
+        {'name': 'status', 'type': 'STRING'},
+        {'name': 'created_at', 'type': 'TIMESTAMP'},
+        {'name': 'resolved_at', 'type': 'TIMESTAMP'},
+        {'name': 'churn_risk', 'type': 'FLOAT'},
+    ],
+    write_disposition='WRITE_TRUNCATE',
+    dag=dag,
+)
+
+# Task 3: Create customer risk analysis
+create_risk_analysis = BigQueryInsertJobOperator(
+    task_id='create_risk_analysis',
+    configuration={
+        'query': {
+            'query': f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET}.customer_risk_analysis` AS
+            WITH customer_activity AS (
+                SELECT 
+                    customer_id,
+                    COUNT(*) as total_clicks,
+                    DATE_DIFF(CURRENT_DATE(), DATE(MAX(timestamp)), DAY) as days_since_last_visit
+                FROM `{PROJECT_ID}.{DATASET}.clickstream`
+                GROUP BY customer_id
+            ),
+            customer_support AS (
+                SELECT
+                    customer_id,
+                    COUNT(*) as support_tickets,
+                    MAX(churn_risk) as churn_risk
+                FROM `{PROJECT_ID}.{DATASET}.support_tickets`
+                GROUP BY customer_id
+            )
+            SELECT
+                c.customer_id,
+                c.name,
+                c.email,
+                c.segment,
+                COALESCE(ca.total_clicks, 0) as total_clicks,
+                COALESCE(ca.days_since_last_visit, 999) as days_since_last_visit,
+                COALESCE(cs.support_tickets, 0) as support_tickets,
+                COALESCE(cs.churn_risk, 0) as churn_risk
+            FROM `{PROJECT_ID}.{DATASET}.customers` c
+            LEFT JOIN customer_activity ca ON c.customer_id = ca.customer_id
+            LEFT JOIN customer_support cs ON c.customer_id = cs.customer_id
+            """,
+            'useLegacySql': False
+        }
+    },
+    dag=dag,
+)
+
+# Task 4: Create daily summary
+create_daily_summary = BigQueryInsertJobOperator(
+    task_id='create_daily_summary',
+    configuration={
+        'query': {
+            'query': f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET}.risk_summary` AS
+            SELECT
+                segment,
+                COUNT(*) as customer_count,
+                AVG(total_clicks) as avg_clicks,
+                AVG(support_tickets) as avg_tickets,
+                AVG(churn_risk) as avg_churn_risk,
+                COUNT(CASE WHEN days_since_last_visit > 30 THEN 1 END) as inactive_customers,
+                COUNT(CASE WHEN churn_risk > 0.5 THEN 1 END) as high_risk_customers
+            FROM `{PROJECT_ID}.{DATASET}.customer_risk_analysis`
+            GROUP BY segment
+            ORDER BY avg_churn_risk DESC;
+            """,
+            'useLegacySql': False
+        }
+    },
+    dag=dag,
+)
+
+# Set task dependencies
+[load_clickstream, load_support_tickets] >> create_risk_analysis >> create_daily_summary
+```
+
+2. Upload the DAG file:
+```bash
+# Get the DAG folder location
+BUCKET=$(gcloud composer environments describe customer-analysis \
+    --location europe-west6 \
+    --format="get(config.dagGcsPrefix)")
+
+# Upload DAG file
+gsutil cp customer_risk_analysis.py ${BUCKET}/dags/
+```
+
+## Step 4: Access Airflow UI
+
+1. Get the Airflow web interface URL:
+```bash
+gcloud composer environments describe customer-analysis \
+    --location europe-west6 \
+    --format="get(config.airflowUri)"
+```
+
+2. Open the URL in your browser
+3. Find your DAG named "customer_risk_analysis"
+4. Turn on the DAG using the toggle switch
+5. Wait for the DAG to run (about 5-10 minutes)
+
+## Step 5: Validate Results
+
+Open BigQuery in the Google Cloud Console and run these queries:
+
+```sql
+-- View top 5 customers by churn risk
 SELECT 
-  cs.*,
-  IF(cs.total_spent > avg.avg_total_spent, 1, 0) as high_value
-FROM `cas-daeng-2024-pect.ecommerce.customer_spending` cs
-CROSS JOIN avg_spending avg;
+    name, 
+    email, 
+    segment, 
+    days_since_last_visit, 
+    support_tickets, 
+    churn_risk 
+FROM `cas-daeng-2024-pect.ecommerce.customer_risk_analysis`
+ORDER BY churn_risk DESC 
+LIMIT 5;
+
+-- View segment summary
+SELECT * 
+FROM `cas-daeng-2024-pect.ecommerce.risk_summary`
+ORDER BY avg_churn_risk DESC;
 ```
 
-### 2.3 Split Data into Training and Test Sets
+## Step 6: Clean Up
 
-It's crucial to test our model on data it hasn't seen during training:
+When you're done with the exercise:
 
-```sql
--- Create training dataset (80% of data)
-CREATE OR REPLACE TABLE `cas-daeng-2024-pect.ecommerce.train_data` AS
-SELECT *
-FROM `cas-daeng-2024-pect.ecommerce.labeled_customers`
-WHERE MOD(ABS(FARM_FINGERPRINT(CAST(customer_id AS STRING))), 10) < 8;
-
--- Create test dataset (20% of data)
-CREATE OR REPLACE TABLE `cas-daeng-2024-pect.ecommerce.test_data` AS
-SELECT *
-FROM `cas-daeng-2024-pect.ecommerce.labeled_customers`
-WHERE MOD(ABS(FARM_FINGERPRINT(CAST(customer_id AS STRING))), 10) >= 8;
-
--- Verify the split
-SELECT
-  'Training' as dataset,
-  COUNT(*) as count
-FROM `cas-daeng-2024-pect.ecommerce.train_data`
-UNION ALL
-SELECT
-  'Test' as dataset,
-  COUNT(*) as count
-FROM `cas-daeng-2024-pect.ecommerce.test_data`;
+```bash
+# Delete Cloud Composer environment
+gcloud composer environments delete customer-analysis \
+    --location europe-west6
 ```
 
-## 3. Creating the Model
+## Troubleshooting
 
-Now we'll create a logistic regression model to predict high-value customers:
+1. If DAG doesn't appear in Airflow UI:
+   - Wait 5 minutes for sync
+   - Check for Python syntax errors
+   - Verify DAG file extension is .py
 
-```sql
-CREATE OR REPLACE MODEL `cas-daeng-2024-pect.ecommerce.customer_value_model`
-OPTIONS(
-  model_type='logistic_reg',
-  input_label_cols=['high_value']
-) AS
-SELECT
-  age,
-  purchase_count,
-  avg_purchase,
-  high_value
-FROM `cas-daeng-2024-pect.ecommerce.train_data`;
-```
+2. If tasks fail:
+   - Check task logs in Airflow UI
+   - Verify file names and paths
+   - Confirm BigQuery dataset exists
 
-## 4. Evaluating the Model
+3. If queries return no results:
+   - Verify data was loaded successfully
+   - Check table names
+   - Confirm schema matches
 
-### 4.1 Check Training Performance
+## Exercise Questions
 
-```sql
--- Evaluate on training data
-SELECT 
-  'Training' as dataset,
-  *
-FROM ML.EVALUATE(MODEL `cas-daeng-2024-pect.ecommerce.customer_value_model`,
-  (SELECT
-    age,
-    purchase_count,
-    avg_purchase,
-    high_value
-   FROM `cas-daeng-2024-pect.ecommerce.train_data`));
-```
+1. How many high-risk customers are in each segment?
+2. What's the average number of support tickets per segment?
+3. Is there a correlation between website visits and support tickets?
+4. Which customer segment has the highest churn risk?
 
-### 4.2 Check Test Performance
+## Additional Resources
 
-```sql
--- Evaluate on test data
-SELECT 
-  'Test' as dataset,
-  *
-FROM ML.EVALUATE(MODEL `cas-daeng-2024-pect.ecommerce.customer_value_model`,
-  (SELECT
-    age,
-    purchase_count,
-    avg_purchase,
-    high_value
-   FROM `cas-daeng-2024-pect.ecommerce.test_data`));
-```
-
-### 4.3 Examine Feature Weights
-
-For logistic regression models, we use ML.WEIGHTS to understand how each feature affects predictions:
-
-```sql
--- Detailed view of feature weights and their effects
-SELECT 
-  processed_input as feature,
-  ROUND(weight, 4) as weight,
-  ROUND(ABS(weight), 4) as weight_magnitude,
-  CASE 
-    WHEN weight > 0 THEN 'increases probability'
-    WHEN weight < 0 THEN 'decreases probability'
-    ELSE 'no effect'
-  END as effect
-FROM ML.WEIGHTS(MODEL `cas-daeng-2024-pect.ecommerce.customer_value_model`)
-ORDER BY ABS(weight) DESC;
-```
-
-This query shows:
-- feature: The input variable name
-- weight: The coefficient assigned by the model
-- weight_magnitude: Absolute value of the weight (shows importance regardless of direction)
-- effect: Whether the feature increases or decreases the probability of being a high-value customer
-
-## 5. Making Predictions
-
-Create a view for easy access to predictions:
-
-```sql
-CREATE OR REPLACE VIEW `cas-daeng-2024-pect.ecommerce.customer_predictions` AS
-SELECT 
-  c.customer_id,
-  c.name,
-  c.email,
-  ROUND(p.predicted_high_value_proba[OFFSET(1)] * 100, 2) as probability_high_value
-FROM `cas-daeng-2024-pect.ecommerce.customers` c,
-ML.PREDICT(MODEL `cas-daeng-2024-pect.ecommerce.customer_value_model`,
-  (SELECT 
-    age,
-    purchase_count,
-    avg_purchase
-   FROM `cas-daeng-2024-pect.ecommerce.labeled_customers`)) p
-WHERE c.customer_id = p.customer_id;
-
--- View top predictions
-SELECT *
-FROM `cas-daeng-2024-pect.ecommerce.customer_predictions`
-WHERE probability_high_value > 70  -- 70% probability threshold
-ORDER BY probability_high_value DESC
-LIMIT 10;
-```
-
-## Understanding the Results
-
-### Key Metrics Explained
-- **Accuracy**: Percentage of correct predictions (e.g., if 0.85, model is correct 85% of the time)
-- **Precision**: Of those predicted as high-value, how many actually were
-- **Recall**: Of actual high-value customers, how many did we find
-- **ROC AUC**: Overall model quality (0.5 is random, 1.0 is perfect)
-
-### Understanding Feature Weights
-- Larger positive weights mean that higher values of that feature increase the likelihood of being a high-value customer
-- Larger negative weights mean that higher values of that feature decrease the likelihood
-- The magnitude (absolute value) tells you how important the feature is to the prediction
-- Features with weights close to zero have little impact on predictions
-
-## Exercises for Practice
-
-1. Modify the prediction threshold:
-```sql
--- Try different probability thresholds
-SELECT 
-  ROUND(probability_high_value/10) * 10 as probability_bucket,
-  COUNT(*) as customer_count
-FROM `cas-daeng-2024-pect.ecommerce.customer_predictions`
-GROUP BY probability_bucket
-ORDER BY probability_bucket DESC;
-```
-
-2. Analyze predictions by age group:
-```sql
-SELECT 
-  FLOOR(age/10) * 10 as age_group,
-  COUNT(*) as customer_count,
-  AVG(probability_high_value) as avg_probability
-FROM `cas-daeng-2024-pect.ecommerce.customer_predictions`
-GROUP BY age_group
-ORDER BY age_group;
-```
-
-## Troubleshooting Common Issues
-
-1. Dataset errors:
-   ```
-   Error: Dataset "cas-daeng-2024-yourname" not found
-   ```
-   - Make sure you replaced all instances of `cas-daeng-2024-pect` with your dataset name
-
-2. Permission errors:
-   ```
-   Error: Access Denied: Dataset cas-daeng-2024-...
-   ```
-   - Verify you're using your own dataset
-   - Check your BigQuery access permissions
-
-3. Model training errors:
-   - Verify no NULL values in your features
-   - Check data types match expectations
-   - Ensure you have enough training data
-
-4. ML.WEIGHTS errors:
-   - Verify the model has finished training
-   - Check the model name is correct
-   - Ensure you're using logistic regression model type
-
-## Next Steps
-
-1. Experiment with different features:
-   - Add customer location
-   - Include product categories
-   - Try different time periods
-
-2. Try different model types:
-   - BOOSTED_TREE_CLASSIFIER (supports ML.FEATURE_IMPORTANCE)
-   - DNN_CLASSIFIER (for deep learning)
-   - XGBoost (for better performance)
-
-3. Visualize your results:
-   - Create charts of predictions
-   - Plot age group distributions
-   - Show feature weight comparisons
-
-## Resources
-- [BigQuery ML Documentation](https://cloud.google.com/bigquery-ml/docs)
-- [SQL Reference](https://cloud.google.com/bigquery/docs/reference/standard-sql/functions-and-operators)
-- [Model Evaluation Metrics](https://cloud.google.com/bigquery-ml/docs/reference/standard-sql/bigqueryml-syntax-evaluate)
+- [Cloud Composer Documentation](https://cloud.google.com/composer/docs)
+- [BigQuery Documentation](https://cloud.google.com/bigquery/docs)
+- [Apache Airflow Documentation](https://airflow.apache.org/docs/)
