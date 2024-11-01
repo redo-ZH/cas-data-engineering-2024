@@ -7,10 +7,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants that students will modify
-PROJECT_ID = "cas-daeng-2024-pect"  # Students replace with their project
+PROJECT_ID = "cas-daeng-2024-rdo"  # Students replace with their project
 REGION = "europe-west1"             # Cloud Storage bucket location
-TRANSACTIONS_FILE = "gs://retail-data-pect/transactions.csv"  # Cloud Storage bucket location
-TEMP_LOCATION = "gs://retail-data-pect/temp"  # Cloud Storage bucket location
+TRANSACTIONS_FILE = "gs://retail-data-rdo/transactions.csv"  # Cloud Storage bucket location
+TEMP_LOCATION = "gs://retail-data-rdo/temp"  # Cloud Storage bucket location
 
 # Additional constants
 DATASET_ID = "ecommerce"
