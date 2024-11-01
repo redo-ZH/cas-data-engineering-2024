@@ -1,7 +1,7 @@
 from google.cloud import pubsub_v1
 
 
-PROJECT_ID = "cas-daeng-2024-pect"  # Students replace with their project
+PROJECT_ID = "cas-daeng-2024-rdo"  # Students replace with their project
 # Create subscriber
 subscriber = pubsub_v1.SubscriberClient()
 subscription_path = f"projects/{PROJECT_ID}/subscriptions/retail-sub"  # Students replace with their project

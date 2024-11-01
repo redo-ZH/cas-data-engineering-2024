@@ -1,6 +1,6 @@
 from google.cloud import pubsub_v1
 
-PROJECT_ID = "cas-daeng-2024-pect"  # Students replace with their project
+PROJECT_ID = "cas-daeng-2024-rdo"  # Students replace with their project
 # Create publisher
 publisher = pubsub_v1.PublisherClient()
 topic_path = f"projects/{PROJECT_ID}/topics/retail-topic"  # Students replace with their project
