@@ -45,7 +45,7 @@ gcloud composer environments create customer-analysis \
     --location europe-west6 \
     --image-version composer-3-airflow-2 \
     --environment-size small \
-    --service-account="YOUR-SERVICE-ACCOUNT-EMAIL"
+    --service-account="522948927928-compute@developer.gserviceaccount.com"
 ```
 
 ### 3. Verify Data Files
